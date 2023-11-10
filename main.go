@@ -26,7 +26,7 @@ func main() {
 
 	ctx := context.Background()
 
-	err = downloadList(ctx, videoURLs)
+	err = DownloadList(ctx, videoURLs)
 	if err != nil {
 		panic(err)
 	}

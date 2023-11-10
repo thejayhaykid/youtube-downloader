@@ -11,7 +11,7 @@ import (
 	"github.com/rs/zerolog"
 )
 
-func downloadList(ctx context.Context, videoURLs []string) (err error) {
+func DownloadList(ctx context.Context, videoURLs []string) (err error) {
 	client := ytdl.Client{
 		HTTPClient: nil,
 		Logger:     zerolog.Nop(),
@@ -25,10 +25,16 @@ func downloadList(ctx context.Context, videoURLs []string) (err error) {
 		return fmt.Errorf("no context provided")
 	}
 
+	errorFile, err := os.Create("errors.txt")
+	if err != nil {
+		return fmt.Errorf("failed to create error file: %w", err)
+	}
+	defer errorFile.Close()
+
 	for _, videoURL := range videoURLs {
 		videoInfo, err := client.GetVideoInfo(ctx, videoURL)
 		if err != nil {
-			fmt.Printf("Failed to get video info for %s: %v\n", videoURL, err)
+			fmt.Fprintf(errorFile, "Failed to get video info for %s: %v\n", videoURL, err)
 			continue
 		}
 
@@ -42,7 +48,7 @@ func downloadList(ctx context.Context, videoURLs []string) (err error) {
 		}
 
 		if audioFormat == nil {
-			fmt.Printf("No audio-only format found for %s\n", videoURL)
+			fmt.Fprintf(errorFile, "No audio-only format found for %s\n", videoURL)
 			continue
 		}
 
@@ -54,7 +60,7 @@ func downloadList(ctx context.Context, videoURLs []string) (err error) {
 		// Download the audio
 		audioFile, err := os.Create(filename + ".mp3")
 		if err != nil {
-			fmt.Printf("Failed to create file for %s: %v\n", videoURL, err)
+			fmt.Fprintf(errorFile, "Failed to create file for %s: %v\n", videoURL, err)
 			continue
 		}
 		defer audioFile.Close()
@@ -62,21 +68,21 @@ func downloadList(ctx context.Context, videoURLs []string) (err error) {
 		ctx := context.Background() // Create a new context
 		err = client.Download(ctx, videoInfo, audioFormat, audioFile)
 		if err != nil {
-			fmt.Printf("Failed to download audio for %s: %v\n", videoURL, err)
+			fmt.Fprintf(errorFile, "Failed to download audio for %s: %v\n", videoURL, err)
 			continue
 		}
 
 		// Save the video info to a JSON file
 		infoFile, err := os.Create(filename + ".json")
 		if err != nil {
-			fmt.Printf("Failed to create info file for %s: %v\n", videoURL, err)
+			fmt.Fprintf(errorFile, "Failed to create info file for %s: %v\n", videoURL, err)
 			continue
 		}
 		defer infoFile.Close()
 
 		err = json.NewEncoder(infoFile).Encode(videoInfo)
 		if err != nil {
-			fmt.Printf("Failed to write info file for %s: %v\n", videoURL, err)
+			fmt.Fprintf(errorFile, "Failed to write info file for %s: %v\n", videoURL, err)
 			continue
 		}
 	}
