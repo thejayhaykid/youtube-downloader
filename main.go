@@ -3,14 +3,19 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
 	"strings"
+	"time"
+	"unicode"
 
-	"github.com/Andreychik32/ytdl"
+	// "github.com/Andreychik32/ytdl"
 	"github.com/joho/godotenv"
+	ytdl "github.com/kkdai/youtube/v2"
 	"google.golang.org/api/option"
 	"google.golang.org/api/youtube/v3"
 )
@@ -33,6 +38,13 @@ func main() {
 
 	ctx := context.Background()
 
+	// Create a subfolder
+	err = os.MkdirAll("downloads", 0755)
+	if err != nil {
+		fmt.Printf("Failed to create subfolder: %v\n", err)
+		os.Exit(1)
+	}
+
 	err = DownloadList(ctx, videoURLs)
 	if err != nil {
 		panic(err)
@@ -42,9 +54,7 @@ func main() {
 }
 
 func DownloadList(ctx context.Context, videoURLs []string) (err error) {
-	client := &ytdl.Client{
-		HTTPClient: &http.Client{},
-	}
+	client := ytdl.Client{}
 
 	if len(videoURLs) == 0 {
 		return fmt.Errorf("no video URLs provided")
@@ -62,57 +72,67 @@ func DownloadList(ctx context.Context, videoURLs []string) (err error) {
 
 	for _, videoURL := range videoURLs {
 		fmt.Println("Downloading", videoURL)
-		videoInfo, err := client.GetVideoInfo(ctx, videoURL)
+		video, err := client.GetVideo(videoURL)
 		if err != nil {
 			fmt.Fprintf(errorFile, "Failed to get video info for %s: %v\n", videoURL, err)
 			continue
 		}
 
-		// Find an audio-only format
-		var audioFormat *ytdl.Format
-		for _, format := range videoInfo.Formats {
-			if format.AudioEncoding != "" && format.VideoEncoding == "" {
-				audioFormat = format
-				break
-			}
-		}
-
-		if audioFormat == nil {
-			fmt.Fprintf(errorFile, "No audio-only format found for %s\n", videoURL)
+		format := video.Formats.FindByItag(140) // Find the audio-only stream (itag 140 is for m4a audio)
+		if format == nil {
+			fmt.Fprintf(errorFile, "No audio stream found for %s\n", videoURL)
 			continue
 		}
 
-		// Create a safe filename
-		datePublished := videoInfo.DatePublished.Format("20060102")
-		title := strings.ReplaceAll(videoInfo.Title, "/", "-")
-		filename := fmt.Sprintf("%s_%s", datePublished, title)
+		stream, _, err := client.GetStream(video, format)
+		if err != nil {
+			fmt.Fprintf(errorFile, "Failed to get audio stream for %s: %v\n", videoURL, err)
+			continue
+		}
 
-		// Download the audio
-		audioFile, err := os.Create(filename + ".mp3")
+		// Create a safe filename by replacing spaces with underscores and removing special characters
+		safeTitle := strings.Map(func(r rune) rune {
+			if r == ' ' {
+				return '_'
+			} else if !unicode.IsLetter(r) && !unicode.IsNumber(r) && r != '_' {
+				return -1
+			}
+			return r
+		}, video.Title)
+
+		publishDate, err := getPublishDate(video.ID)
+		if err != nil {
+			fmt.Fprintf(errorFile, "Failed to get publish date for %s: %v\n", videoURL, err)
+			continue
+		}
+
+		filename := fmt.Sprintf("downloads/%s_%s", publishDate.Format("2006-01-02"), safeTitle)
+
+		file, err := os.Create(filename + ".m4a") // Save the audio stream to a .m4a file
 		if err != nil {
 			fmt.Fprintf(errorFile, "Failed to create file for %s: %v\n", videoURL, err)
 			continue
 		}
-		defer audioFile.Close()
+		defer file.Close()
 
-		ctx := context.Background() // Create a new context
-		err = client.Download(ctx, videoInfo, audioFormat, audioFile)
+		_, err = io.Copy(file, stream)
 		if err != nil {
 			fmt.Fprintf(errorFile, "Failed to download audio for %s: %v\n", videoURL, err)
 			continue
 		}
 
-		// Save the video info to a JSON file
-		infoFile, err := os.Create(filename + ".json")
+		// Save metadata to a separate file
+		metadataFile, err := os.Create(filename + ".json")
 		if err != nil {
-			fmt.Fprintf(errorFile, "Failed to create info file for %s: %v\n", videoURL, err)
+			fmt.Fprintf(errorFile, "Failed to create metadata file for %s: %v\n", videoURL, err)
 			continue
 		}
-		defer infoFile.Close()
+		defer metadataFile.Close()
 
-		err = json.NewEncoder(infoFile).Encode(videoInfo)
+		metadataEncoder := json.NewEncoder(metadataFile)
+		err = metadataEncoder.Encode(video)
 		if err != nil {
-			fmt.Fprintf(errorFile, "Failed to write info file for %s: %v\n", videoURL, err)
+			fmt.Fprintf(errorFile, "Failed to write metadata for %s: %v\n", videoURL, err)
 			continue
 		}
 	}
@@ -147,4 +167,41 @@ func GetVideoURLs(channelId string) []string {
 	}
 
 	return videoURLs
+}
+
+func convertToEmbedURL(youtubeURL string) string {
+	// Extract the video ID from the YouTube URL
+	// Assumes the URL is in the format "https://www.youtube.com/watch?v=VIDEO_ID"
+	videoID := strings.Split(youtubeURL, "=")[1]
+
+	// Return the embed URL
+	return "https://www.youtube.com/embed/" + videoID
+}
+
+func getPublishDate(videoID string) (time.Time, error) {
+	// Replace with your API key
+	apiKey := os.Getenv("YOUTUBE_API_KEY")
+
+	resp, err := http.Get(fmt.Sprintf("https://www.googleapis.com/youtube/v3/videos?part=snippet&id=%s&key=%s", videoID, apiKey))
+	if err != nil {
+		return time.Time{}, err
+	}
+	defer resp.Body.Close()
+
+	var data struct {
+		Items []struct {
+			Snippet struct {
+				PublishedAt time.Time `json:"publishedAt"`
+			} `json:"snippet"`
+		} `json:"items"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		return time.Time{}, err
+	}
+
+	if len(data.Items) == 0 {
+		return time.Time{}, errors.New("no video found")
+	}
+
+	return data.Items[0].Snippet.PublishedAt, nil
 }

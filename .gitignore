@@ -5,6 +5,10 @@
 *.so
 *.dylib
 
+# Actual download files
+*.m4a
+downloads
+
 # Test binary, built with `go test -c`
 *.test
 
